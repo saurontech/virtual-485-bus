@@ -1,0 +1,19 @@
+{
+	"serials":
+	[
+		{"path":"/dev/ttyADV0",
+		"baudrate":921600,
+		"flowctrl":"none",
+		"stopbit":1,
+		"parity":"none",
+		"databit":8},
+		{"path":"/dev/ttyADV1",
+		"baudrate":921600,
+		"flowctrl":"none",
+		"stopbit":1,
+		"parity":"none",
+		"databit":8}
+	]
+	
+
+}
