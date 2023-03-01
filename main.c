@@ -602,7 +602,6 @@ int main(int argc, char **argv)
 
 	while(1){
 		int ret;
-		int i;
 
 		FD_ZERO(&rfds);
 		FD_ZERO(&wfds);
@@ -647,7 +646,6 @@ int main(int argc, char **argv)
 
 		list_for_each(pos, &bus_fds){
 			serial_config * _s = container_of(pos, serial_config, list);
-			//printf("check bus fd %d read\n", i);
 			if(FD_ISSET(_s->fd, &rfds)){
 				int lroom = get_rb_lroom(tx);
 				ret = read(_s->fd, &tx.mbase[tx.tail], lroom);
