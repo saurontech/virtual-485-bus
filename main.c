@@ -256,6 +256,11 @@ int main(int argc, char **argv)
 
 	INIT_LIST_HEAD(&bus_fds);
 
+	if(argc != 3){
+		printf("usage %s [config.json] [/proc/vcom/advproc*]\n", argv[0]);
+		return 0;
+	}
+
 
 	loadConfig(argv[1]);
 
