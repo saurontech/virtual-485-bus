@@ -167,16 +167,14 @@ int loadConfig(char *filepath)
 			//serial_config * _serial;
 			bus_fd * _serial;
 			snprintf(cntstr, sizeof(cntstr), "[%d]", i);
-			printf("reading index:\"%s\"\n", cntstr);
+			//printf("reading index:\"%s\"\n", cntstr);
 			if(jstree_read(result.node->r, &tmp, "serials", cntstr) != 2){
 				break;
 			}
-			printf("%s(%d)\n", __func__, __LINE__);
+
 			_serial = malloc(sizeof(bus_fd));
-			printf("%s(%d)\n", __func__, __LINE__);
 
 			list_add(&(_serial->list), &bus_fds);
-			printf("%s(%d)\n", __func__, __LINE__);
 
 			loadSerialConfig(tmp, 
 					&_serial->config.serial);
@@ -206,30 +204,28 @@ int loadConfig(char *filepath)
 		int on = 1;
 		int off = 0;
 		struct sockaddr_in6 sin6;
+
 		_udp = malloc(sizeof(bus_fd));
-		printf("udp rnode type %d\n", rnode->data.type);
+
 		INIT_LIST_HEAD(&_udp->config.udp.targets);
+
 		loadUdpConfig(rnode, &_udp->config.udp);
-		printf("%s(%d)\n", __func__, __LINE__);
 
 		_udp->fd = socket(AF_INET6, SOCK_DGRAM, 0);
 
-		printf("%s(%d)\n", __func__, __LINE__);
-		printf("socket fd = %d\n", _udp->fd);
 		setsockopt(_udp->fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
 		setsockopt(_udp->fd, IPPROTO_IP, IP_PKTINFO, &on, sizeof(on));
 		setsockopt(_udp->fd, IPPROTO_IPV6, IPV6_RECVPKTINFO, &on, sizeof(on));
 		setsockopt(_udp->fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof(off));
-		printf("%s(%d)\n", __func__, __LINE__);
+
 		memset(&sin6, '\0', sizeof(sin6));
 		sin6.sin6_family = AF_INET6;
 		sin6.sin6_port = htons(atoi(_udp->config.udp.port)/*MY_UDP_PORT*/);
 		sin6.sin6_addr =  in6addr_any;
-		printf("%s(%d)\n", __func__, __LINE__);
 
 		ret = bind(_udp->fd, (struct sockaddr*)&sin6, sizeof(sin6));
 
-		printf("bind result %d port %hu\n", ret, ntohs(sin6.sin6_port)/*MY_UDP_PORT*/);
+//		printf("bind result %d port %hu\n", ret, ntohs(sin6.sin6_port)/*MY_UDP_PORT*/);
 		_udp->read = udp_recvfrom;
 		_udp->write = udp_sendto;
 		list_add(&(_udp->list), &bus_fds);
