@@ -14,6 +14,16 @@
 #include <time.h>
 #include <netdb.h>
 #include <asm-generic/termbits.h>
+#include <netinet/in.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <string.h>
+#include <stdio.h>
+#include <arpa/inet.h>
+#include <net/if.h>
+#include <ifaddrs.h>
+
+
 
 #include "advioctl.h"
 #include "jsmn.h"
@@ -284,9 +294,7 @@ static unsigned _cflag_sbit(int bitlen)
 	}
 }
 
-
 typedef struct{
-	struct list_head list;
 	char path[1024];
 	int index;
 	int baudrate; 
@@ -296,6 +304,29 @@ typedef struct{
 	unsigned int flowrep;
 	int fd;
 } serial_config;
+
+typedef struct{
+	struct list_head list;
+	struct sockaddr_in6 saddr;
+}udp_target;
+
+typedef struct {
+	struct list_head targets;
+	char port[64];
+} udp_config;
+
+typedef union {
+	serial_config serial;
+	udp_config udp;
+} _config;
+
+typedef struct {
+	struct list_head list;
+	int fd;
+	int (*read)(int fd, struct ring_buf *tx, _config *config);
+	int (*write)(int fd, struct ring_buf *rx, int wlen, int wllen, _config *config);
+	_config config;
+}bus_fd;
 
 static inline int _set_termois(int fd, struct termios2 *newtio, serial_config * config)
 {
@@ -435,6 +466,193 @@ int loadSerialConfig(_tree_node *tmp, serial_config * config)
 	return 0;
 }
 
+int loadUdpConfig(_tree_node *tmp, udp_config * config)
+{
+	char content[1024];
+	char ipv4to6[2048];
+	int i = 0;
+	char array[64];
+	int ret;
+
+
+	_tree_node *rnode;
+	rnode = 0;
+
+	//rnode = find_node(tmp, "port");
+	if(jstree_read(tmp, &rnode, "port") != 1){
+		printf("missing udp port\n");
+		exit(0);
+	}
+	//rnode = tmp->r;
+	get_node_string(rnode, content, sizeof(content));
+	strncpy(config->port, content, sizeof(config->port));	
+
+	do{
+		udp_target *_t;
+		snprintf(array, sizeof(array), "[%d]", i);
+		if(jstree_read(tmp, &rnode, "targets", array, "ip") != 3){
+			break;
+		}
+		_t = malloc(sizeof(udp_target));
+		get_node_string(rnode, content, sizeof(content));
+
+		ret = inet_pton(AF_INET6, content, &(_t->saddr.sin6_addr));
+		if(ret != 1){
+			snprintf(ipv4to6, sizeof(ipv4to6), "::ffff:%s", content);
+			ret = inet_pton(AF_INET6, ipv4to6, &(_t->saddr.sin6_addr));
+			printf("ret = %d ipv4to6 %s\n", ret, ipv4to6);
+		}
+
+
+		if(jstree_read(tmp, &rnode, "targets", array, "port") != 3){
+			break;
+		}
+		get_node_string(rnode, content, sizeof(content));
+		printf("content %s\n", content);
+		_t->saddr.sin6_port = htons(atoi(content));
+		printf("port = %hu\n", ntohs(_t->saddr.sin6_port));
+		_t->saddr.sin6_family = AF_INET6;
+
+	
+		list_add( &_t->list, &config->targets);
+
+		printf("%s(%d)\n", __func__, __LINE__);
+		i++;
+	}while(1);
+
+	printf("i = %d\n", i);
+
+	if(i == 0){
+		printf("missing udp targets\n");
+		exit(0);
+	}
+
+	
+	return 0;
+}
+
+int serial_read(int fd, struct ring_buf *tx, _config * config)
+{
+	int ret;
+	int retval;
+	int inqlen;
+	int lroom = get_rb_lroom(*tx);
+	printf("read serial\n");
+	ret = read(fd, &tx->mbase[tx->tail], lroom);
+	if(ret <= 0){
+		printf("ret = %d get_rb_llength = %d\n", ret, lroom);
+		return ret;
+	}
+
+	//ioctl(fd, ADVVCOM_IOCSTXTAIL, &ret);
+	//buf_update(fd, &tx, VC_BUF_TX);
+
+	if(ret != lroom){
+		return ret;
+	}
+
+	ioctl(fd, TIOCINQ, &inqlen);
+	if(inqlen == 0){
+		return ret;
+	}
+	retval = ret;
+	ret = read(fd, &tx->mbase[tx->tail], get_rb_lroom(*tx));
+	if(ret <= 0){
+		return retval;
+	}
+	return retval + ret;
+	//ioctl(fd, ADVVCOM_IOCSTXTAIL, &ret);
+	//buf_update(fd, &tx, VC_BUF_TX);
+}
+
+int serial_write(int fd, struct ring_buf * rx, int wlen, int wllen, _config * config)
+{
+	int ret;
+	ret = write(fd, &rx->mbase[rx->head], wllen);
+	if(ret !=  wllen ){
+		//printf("5555555555555555555555555555555555 ret = %d wllen = %d\n", ret, wllen);
+		return ret;
+	}
+
+	ret = write(fd, rx->mbase, wlen - wllen);
+	if(ret != wlen - wllen){
+		//printf("6666666666666666666666666666666 ret = %d wlien = %d\n", ret, wlen - wlien);
+		return ret;
+	}
+}
+
+int udp_recvfrom(int fd, struct ring_buf *tx, _config * config)
+{
+	int ret;
+	int retval;
+	int inqlen;
+	int ptr;
+	int mvlen;
+	int lroom = get_rb_lroom(*tx);
+	int room = get_rb_room(*tx);
+	struct sockaddr_in6 raddr;
+	socklen_t addrlen = sizeof(raddr);
+
+	char rbuf[1500];
+//	printf("%s(%d)\n", __func__, __LINE__);
+	ret = recvfrom(fd, rbuf, sizeof(rbuf), 0, &raddr, &addrlen);
+//	printf("recvfrom ret %d\n", ret);
+	if(ret <= 0){
+		printf("ret = %d get_rb_llength = %d\n", ret, lroom);
+		return ret;
+	}
+	
+	if(ret > lroom){
+		memcpy(&tx->mbase[tx->tail], rbuf, lroom);
+		if(lroom != room){
+			int len = (room > ret)?(ret - lroom):(room -lroom);
+			//printf("recvfrom movlen %d %d %d\n", ret, room, lroom);
+			memcpy(tx->mbase, &rbuf[lroom], len);
+		}
+	}else{
+		memcpy(&tx->mbase[tx->tail], rbuf, ret);
+	}
+
+	
+	return ret;
+	//ioctl(fd, ADVVCOM_IOCSTXTAIL, &ret);
+	//buf_update(fd, &tx, VC_BUF_TX);
+}
+
+
+int udp_sendto(int fd, struct ring_buf * rx, int wlen, int wllen, _config * config)
+{
+	char sbuf[4096];
+	struct list_head *pos;
+	//printf("%s(%d)\n", __func__, __LINE__);
+
+	memcpy(sbuf, &rx->mbase[rx->head], wllen);
+	if(wlen != wllen){
+		memcpy(&sbuf[wllen], rx->mbase, wlen - wllen);
+	}
+	//printf("%s(%d)\n", __func__, __LINE__);
+	list_for_each(pos, &config->udp.targets){
+		int ret;
+		int len;
+		int ptr = 0;
+		int txlen = wlen;
+		udp_target * _s = container_of(pos, udp_target, list);
+		while(txlen > 0){
+			len = (txlen > 1500)?1500:txlen;
+			ret = sendto(fd, &sbuf[ptr], len, 
+				MSG_NOSIGNAL, 
+				&_s->saddr, sizeof(struct sockaddr_in6));
+			if(ret < 0){
+				printf("sendto error:%s\n", strerror(errno));
+			}
+			//printf("sendtofd %d ptr = %d len = %d ret%d\n", fd, ptr, len , ret);
+			txlen -= len;
+			ptr += len;
+		}
+	}
+	return wlen;
+}
+
 
 int loadConfig(char *filepath)
 {
@@ -497,32 +715,81 @@ int loadConfig(char *filepath)
 	//printf("%s(%d)\n", __func__, __LINE__);
 
 	if(jstree_read(result.node->r, &rnode, "serials") == 1){
+		struct termios2 newtio;
 		char cntstr[12];
 		int i;
 		i = 0;
 		do{
-			serial_config * _serial;
+			//serial_config * _serial;
+			bus_fd * _serial;
 			snprintf(cntstr, sizeof(cntstr), "[%d]", i);
 			printf("reading index:\"%s\"\n", cntstr);
 			if(jstree_read(result.node->r, &tmp, "serials", cntstr) != 2){
 				break;
 			}
 			printf("%s(%d)\n", __func__, __LINE__);
-			_serial = malloc(sizeof(serial_config));
+			_serial = malloc(sizeof(bus_fd));
 			printf("%s(%d)\n", __func__, __LINE__);
 
 			list_add(&(_serial->list), &bus_fds);
 			printf("%s(%d)\n", __func__, __LINE__);
 
 			loadSerialConfig(tmp, 
-					_serial);
+					&_serial->config.serial);
+
+			_serial->fd = open(_serial->config.serial.path, O_RDWR);
+			if(_serial->fd < 0){
+				printf("cannot open %s sfd = %d\n", 
+					_serial->config.serial.path, _serial->fd);
+				exit(0);
+			}
+			__set_nonblock(_serial->fd);
+			_set_termois(_serial->fd, &newtio, &_serial->config.serial);
+
+			_serial->write = serial_write;
+			_serial->read = serial_read;
 
 			i++;
 
 		}while(1);
-	}else{
+	}/*else{
 		printf("missing serials\n");
 		exit(0);
+	}*/
+	if(jstree_read(result.node->r, &rnode, "udp") == 1){
+		bus_fd * _udp;
+		int ret;
+		int on = 1;
+		int off = 0;
+		struct sockaddr_in6 sin6;
+		_udp = malloc(sizeof(bus_fd));
+		printf("udp rnode type %d\n", rnode->data.type);
+		INIT_LIST_HEAD(&_udp->config.udp.targets);
+		loadUdpConfig(rnode, &_udp->config.udp);
+		printf("%s(%d)\n", __func__, __LINE__);
+
+		_udp->fd = socket(AF_INET6, SOCK_DGRAM, 0);
+
+		printf("%s(%d)\n", __func__, __LINE__);
+		printf("socket fd = %d\n", _udp->fd);
+		setsockopt(_udp->fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+		setsockopt(_udp->fd, IPPROTO_IP, IP_PKTINFO, &on, sizeof(on));
+		setsockopt(_udp->fd, IPPROTO_IPV6, IPV6_RECVPKTINFO, &on, sizeof(on));
+		setsockopt(_udp->fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof(off));
+		printf("%s(%d)\n", __func__, __LINE__);
+		memset(&sin6, '\0', sizeof(sin6));
+		sin6.sin6_family = AF_INET6;
+		sin6.sin6_port = htons(atoi(_udp->config.udp.port)/*MY_UDP_PORT*/);
+		sin6.sin6_addr =  in6addr_any;
+		printf("%s(%d)\n", __func__, __LINE__);
+
+		ret = bind(_udp->fd, (struct sockaddr*)&sin6, sizeof(sin6));
+
+		printf("bind result %d port %hu\n", ret, ntohs(sin6.sin6_port)/*MY_UDP_PORT*/);
+		_udp->read = udp_recvfrom;
+		_udp->write = udp_sendto;
+		list_add(&(_udp->list), &bus_fds);
+
 	}
 
 	close(fd);
@@ -548,24 +815,6 @@ int main(int argc, char **argv)
 
 	loadConfig(argv[1]);
 
-
-	list_for_each(pos, &bus_fds){
-		int sfd;
-		struct termios2 newtio;
-
-		serial_config * _s = container_of(pos, serial_config, list);
-
-		sfd = open(_s->path, O_RDWR);
-		if(sfd < 0){
-			printf("cannot open %s sfd = %d\n", _s->path, sfd);
-			return 0;
-		}
-		_s->fd = sfd;
-		__set_nonblock(sfd);
-
-		_set_termois(sfd, &newtio, _s);
-		
-	}
 
 	fd = open(argv[2], O_RDWR);
 	if(fd < 0){
@@ -594,7 +843,7 @@ int main(int argc, char **argv)
 
 	maxfd = fd;
 	list_for_each(pos, &bus_fds){
-		serial_config * _s = container_of(pos, serial_config, list);
+		bus_fd * _s = container_of(pos, bus_fd, list);
 		if(_s->fd > maxfd){
 			maxfd = _s->fd;
 		}
@@ -610,13 +859,13 @@ int main(int argc, char **argv)
 		buf_update(fd, &tx, VC_BUF_TX);
 		if(is_rb_empty(tx)){
 			list_for_each(pos, &bus_fds){
-				serial_config * _s = container_of(pos, serial_config, list);
+				bus_fd * _s = container_of(pos, bus_fd, list);
 				FD_SET(_s->fd, &rfds);
 			}
 		}
 		if(!is_rb_empty(rx)){
 			list_for_each(pos, &bus_fds){
-				serial_config * _s = container_of(pos, serial_config, list);
+				bus_fd * _s = container_of(pos, bus_fd, list);
 				FD_SET(_s->fd, &wfds);
 			}
 		}
@@ -645,33 +894,12 @@ int main(int argc, char **argv)
 		}
 
 		list_for_each(pos, &bus_fds){
-			serial_config * _s = container_of(pos, serial_config, list);
+			bus_fd * _s = container_of(pos, bus_fd, list);
 			if(FD_ISSET(_s->fd, &rfds)){
-				int lroom = get_rb_lroom(tx);
-				ret = read(_s->fd, &tx.mbase[tx.tail], lroom);
-				if(ret <= 0){
-					printf("ret = %d get_rb_llength = %d\n", ret, lroom);
-					continue;
-				}
-				
+				int ret;
+				ret = _s->read(_s->fd, &tx, &_s->config);
 				ioctl(fd, ADVVCOM_IOCSTXTAIL, &ret);
-				buf_update(fd, &tx, VC_BUF_TX);
-
-				if(ret != lroom){
-					continue;
-				}
-				int inqlen;
-				ioctl(_s->fd, TIOCINQ, &inqlen);
-				if(inqlen == 0){
-					continue;
-				}
-				ret = read(_s->fd, &tx.mbase[tx.tail], get_rb_lroom(tx));
-				if(ret <= 0){
-					continue;
-				}
-				ioctl(fd, ADVVCOM_IOCSTXTAIL, &ret);
-				buf_update(fd, &tx, VC_BUF_TX);
-				
+				buf_update(fd, &tx, VC_BUF_TX);	
 			}
 		}
 		do{
@@ -685,18 +913,8 @@ int main(int argc, char **argv)
 
 			list_for_each(pos, &bus_fds){
 					int ret;
-					serial_config * _s = container_of(pos, serial_config, list);
-					ret = write(_s->fd, &rx.mbase[rx.head], wllen);
-					if(ret !=  wllen ){
-						//printf("5555555555555555555555555555555555 ret = %d wllen = %d\n", ret, wllen);
-						continue;
-					}
-
-					ret = write(_s->fd, rx.mbase, wlen - wllen);
-					if(ret != wlen - wllen){
-						//printf("6666666666666666666666666666666 ret = %d wlien = %d\n", ret, wlen - wlien);
-						continue;
-					}
+					bus_fd * _s = container_of(pos, bus_fd, list);
+					_s->write(_s->fd, &rx, wlen, wllen, &_s->config);
 			}
 				
 			ioctl(fd, ADVVCOM_IOCSRXHEAD, &wlen);
