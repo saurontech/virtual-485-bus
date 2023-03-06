@@ -117,13 +117,23 @@ int loadConfig(char *filepath)
 	fd = open(filepath, O_RDONLY);
 	printf("%s fd = %d\n", filepath, fd);
 
+	if(fd < 0){
+		return -1;
+	}
+
 	filelen = lseek(fd, 0, SEEK_END);
 //	printf("filelen = %d\n", filelen);
+	if(filelen <= 0){
+		return -1;
+	}
 	
 	lseek(fd, 0, SEEK_SET);
 	filedata = malloc(filelen);
 
 	ret = read(fd, filedata, filelen);
+	if(ret != filelen){
+		return -1;
+	}
 
 	printf("ret = %d\n", ret);
 
@@ -258,12 +268,15 @@ int main(int argc, char **argv)
 	}
 
 
-	loadConfig(argv[1]);
+	if(loadConfig(argv[1]) == -1){
+		printf("failed to load config file\n");
+		return 0;
+	}
 
 
 	fd = open(argv[2], O_RDWR);
 	if(fd < 0){
-		printf("cannot open file:%s\n", strerror(errno));
+		printf("cannot open proc file:%s\n", strerror(errno));
 		return 0;
 	}
 	printf("mmap fd =%d\n", fd);
